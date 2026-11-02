@@ -1,0 +1,10 @@
+
+numpy
+pandas
+openpyxl
+matplotlib
+Pillow
+torch
+torchvision
+thop
+tensorboard
