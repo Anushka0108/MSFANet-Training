@@ -64,10 +64,12 @@ def main():
         targets=DATASET_NAME,
         height=IMAGE_HEIGHT,
         width=IMAGE_WIDTH,
-        batch_size=BATCH_SIZE,
+        batch_size_train=BATCH_SIZE,
+        batch_size_test=128,
         num_instances=NUM_INSTANCES,
         train_sampler="RandomIdentitySampler",
         workers=NUM_WORKERS,
+        use_gpu=True,
         transforms=[
             "random_flip",
             "random_crop",

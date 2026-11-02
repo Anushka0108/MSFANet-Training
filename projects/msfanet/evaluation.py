@@ -77,8 +77,12 @@ def evaluate_market1501(
         ).astype(np.int32)
 
         remove = (
-            (gallery_pids[order] == query_pid) &
-            (gallery_camids[order] == query_camid)
+            (gallery_pids[order] == 0) |
+            (gallery_pids[order] == -1) |
+            (
+                (gallery_pids[order] == query_pid) &
+                (gallery_camids[order] == query_camid)
+            )
         )
 
         keep = ~remove
