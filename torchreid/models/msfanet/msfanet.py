@@ -1,127 +1,99 @@
-
 import torch
 import torch.nn as nn
 
 from .msfa_block import MSFABlock
 
 
-class MSFANet(nn.Module):
-    def __init__(
-        self,
-        num_classes,
-        loss="softmax",
-        pretrained=False,
-        use_gpu=True,
-        feature_dim=512
-    ):
+class ConvLayer(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding):
         super().__init__()
+        self.layer = nn.Sequential(
+            nn.Conv2d(
+                in_channels, out_channels, kernel_size=kernel_size,
+                stride=stride, padding=padding, bias=False
+            ),
+            nn.BatchNorm2d(out_channels),
+            nn.LeakyReLU(0.1, inplace=True)
+        )
 
-        if loss not in ["softmax", "triplet"]:
-            raise ValueError("Unsupported loss: {}".format(loss))
+    def forward(self, x):
+        return self.layer(x)
 
+
+class MSFANet(nn.Module):
+    def __init__(self, num_classes, loss="softmax", pretrained=False):
+        super().__init__()
         self.loss = loss
-        self.feature_dim = feature_dim
 
-        self.stem = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False),
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.1, inplace=True),
-            nn.AvgPool2d(kernel_size=3, stride=2, padding=1)
-        )
+        self.conv1 = ConvLayer(3, 64, kernel_size=7, stride=2, padding=3)
+        self.pool1 = nn.AvgPool2d(kernel_size=3, stride=2, padding=1)
 
-        self.transition1 = nn.Sequential(
-            nn.Conv2d(64, 256, kernel_size=1, bias=False),
-            nn.BatchNorm2d(256),
-            nn.LeakyReLU(0.1, inplace=True)
-        )
+        self.stage1 = self._make_stage(64, 256, blocks=1, first_stride=1)
+        self.stage2 = self._make_stage(256, 384, blocks=2, first_stride=2)
+        self.stage3 = self._make_stage(384, 512, blocks=3, first_stride=2)
 
-        self.stage1 = nn.Sequential(
-            MSFABlock(256, 256)
-        )
+        self.global_avgpool = nn.AdaptiveAvgPool2d(1)
+        self.classifier = nn.Linear(512, num_classes)
 
-        self.transition2 = nn.Sequential(
-            nn.Conv2d(256, 384, kernel_size=1, stride=2, bias=False),
-            nn.BatchNorm2d(384),
-            nn.LeakyReLU(0.1, inplace=True)
-        )
+        self.last_activation_map = None
 
-        self.stage2 = nn.Sequential(
-            MSFABlock(384, 384),
-            MSFABlock(384, 384)
-        )
+        self._initialize_weights()
 
-        self.transition3 = nn.Sequential(
-            nn.Conv2d(384, 512, kernel_size=1, stride=2, bias=False),
-            nn.BatchNorm2d(512),
-            nn.LeakyReLU(0.1, inplace=True)
-        )
+    def _make_stage(self, in_channels, out_channels, blocks, first_stride):
+        layers = []
+        for index in range(blocks):
+            stride = first_stride if index == 0 else 1
+            block_in = in_channels if index == 0 else out_channels
+            layers.append(MSFABlock(block_in, out_channels, stride=stride))
+        return nn.Sequential(*layers)
 
-        self.stage3 = nn.Sequential(
-            MSFABlock(512, 512),
-            MSFABlock(512, 512),
-            MSFABlock(512, 512)
-        )
-
-        self.global_pool = nn.AdaptiveAvgPool2d(1)
-        self.classifier = nn.Linear(feature_dim, num_classes)
-
-        self._init_params()
-
-    def _init_params(self):
+    def _initialize_weights(self):
         for module in self.modules():
             if isinstance(module, nn.Conv2d):
-                nn.init.kaiming_normal_(
-                    module.weight,
-                    mode="fan_out",
-                    nonlinearity="leaky_relu"
-                )
+                nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="leaky_relu")
             elif isinstance(module, nn.BatchNorm2d):
-                nn.init.constant_(module.weight, 1)
-                nn.init.constant_(module.bias, 0)
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
             elif isinstance(module, nn.Linear):
-                nn.init.normal_(module.weight, 0, 0.01)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
+                nn.init.normal_(module.weight, std=0.001)
+                nn.init.zeros_(module.bias)
 
-    def featuremaps(self, x):
-        x = self.stem(x)
-        x = self.transition1(x)
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.pool1(x)
         x = self.stage1(x)
-        x = self.transition2(x)
         x = self.stage2(x)
-        x = self.transition3(x)
         x = self.stage3(x)
-        return x
 
-    def forward(self, x, return_featuremaps=False):
-        x = self.featuremaps(x)
+        self.last_activation_map = x.detach().abs().mean(dim=1, keepdim=True)
 
-        if return_featuremaps:
-            return x
-
-        features = self.global_pool(x)
-        features = torch.flatten(features, 1)
-
+        features = self.global_avgpool(x).flatten(1)
         if not self.training:
             return features
 
-        outputs = self.classifier(features)
+        logits = self.classifier(features)
+        return logits, features
 
-        if self.loss == "softmax":
-            return outputs
+    def get_visual_maps(self):
+        maps = {"final_activation": self.last_activation_map}
+        index = 0
+        for stage_name in ("stage1", "stage2", "stage3"):
+            stage = getattr(self, stage_name)
+            for block_index, block in enumerate(stage):
+                for branch_name in ("branch1", "branch2", "branch3"):
+                    branch = getattr(block, branch_name)
+                    for fa_index, fa in enumerate(branch):
+                        if fa.last_attention_map is not None:
+                            maps[
+                                f"{stage_name}_block{block_index + 1}_{branch_name}_fa{fa_index + 1}"
+                            ] = fa.last_attention_map
+                for branch_index, branch_map in enumerate(block.last_branch_maps):
+                    maps[
+                        f"{stage_name}_block{block_index + 1}_branch{branch_index + 1}"
+                    ] = branch_map
+                index += 1
+        return maps
 
-        return outputs, features
 
-
-def msfanet(
-    num_classes,
-    loss="softmax",
-    pretrained=False,
-    use_gpu=True
-):
-    return MSFANet(
-        num_classes=num_classes,
-        loss=loss,
-        pretrained=pretrained,
-        use_gpu=use_gpu
-    )
+def msfanet(num_classes, loss="softmax", pretrained=False, **kwargs):
+    return MSFANet(num_classes=num_classes, loss=loss, pretrained=pretrained)

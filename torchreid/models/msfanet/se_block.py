@@ -1,36 +1,21 @@
-
 import torch
 import torch.nn as nn
 
 
 class SEBlock(nn.Module):
-
     def __init__(self, channels, reduction=16):
         super().__init__()
-
-        hidden_channels = max(channels // reduction, 1)
-
+        hidden = max(channels // reduction, 1)
         self.pool = nn.AdaptiveAvgPool2d(1)
-
-        self.fc = nn.Sequential(
-            nn.Linear(channels, hidden_channels, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_channels, channels, bias=False),
-            nn.Sigmoid()
-        )
-
-        self.last_attention = None
+        self.fc1 = nn.Conv2d(channels, hidden, kernel_size=1, bias=True)
+        self.act = nn.LeakyReLU(0.1, inplace=True)
+        self.fc2 = nn.Conv2d(hidden, channels, kernel_size=1, bias=True)
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-
-        batch, channels, _, _ = x.size()
-
-        weights = self.pool(x).view(batch, channels)
-
-        weights = self.fc(weights).view(
-            batch, channels, 1, 1
-        )
-
-        self.last_attention = weights.detach()
-
-        return x * weights
+        weights = self.pool(x)
+        weights = self.fc1(weights)
+        weights = self.act(weights)
+        weights = self.fc2(weights)
+        weights = self.sigmoid(weights)
+        return x * weights, weights

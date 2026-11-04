@@ -1,51 +1,26 @@
-
 import torch
 
 
 def calculate_complexity(model, height=256, width=128):
-    total_parameters = sum(
-        parameter.numel()
-        for parameter in model.parameters()
-    )
-
-    trainable_parameters = sum(
-        parameter.numel()
-        for parameter in model.parameters()
-        if parameter.requires_grad
-    )
-
-    result = {
-        "Total Parameters (M)": total_parameters / 1e6,
-        "Trainable Parameters (M)": trainable_parameters / 1e6,
-        "MACs (G)": None,
-        "FLOPs (G)": None
-    }
+    parameters = sum(parameter.numel() for parameter in model.parameters())
+    macs = None
+    flops = None
 
     try:
         from thop import profile
-
         device = next(model.parameters()).device
-        dummy_input = torch.randn(
-            1, 3, height, width,
-            device=device
-        )
-
+        dummy = torch.randn(1, 3, height, width, device=device)
         was_training = model.training
         model.eval()
-
-        macs, _ = profile(
-            model,
-            inputs=(dummy_input,),
-            verbose=False
-        )
-
+        macs, _ = profile(model, inputs=(dummy,), verbose=False)
         if was_training:
             model.train()
-
-        result["MACs (G)"] = macs / 1e9
-        result["FLOPs (G)"] = (2 * macs) / 1e9
-
+        flops = 2 * macs
     except Exception as error:
-        print("MAC/FLOP calculation unavailable:", error)
+        print(f"MAC/FLOP profiling unavailable: {error}")
 
-    return result
+    return {
+        "parameters": int(parameters),
+        "MACs": None if macs is None else float(macs),
+        "FLOPs": None if flops is None else float(flops)
+    }
