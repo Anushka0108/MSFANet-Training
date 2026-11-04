@@ -48,7 +48,7 @@ class MSFABlock(nn.Module):
 
         self.fuse = nn.Sequential(
             nn.Conv2d(
-                width,
+                width * 3,
                 out_channels,
                 kernel_size=1,
                 bias=False

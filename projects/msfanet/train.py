@@ -75,7 +75,7 @@ def main():
         amsgrad=True
     )
 
-    milestones = [38, 56, 75, 88]
+    milestones = [150, 225, 300, 350]
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer, milestones=milestones, gamma=0.1
     )

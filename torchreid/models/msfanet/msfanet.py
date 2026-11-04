@@ -119,11 +119,7 @@ class MSFANet(nn.Module):
 
         logits = self.classifier(features)
 
-        if self.loss == "softmax":
-            return logits
-
-        if self.loss == "triplet":
-            return logits, features
+        return logits, features
 
         raise KeyError("Unsupported loss: {}".format(self.loss))
 

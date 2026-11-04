@@ -20,6 +20,7 @@ print("Total parameters:", total_params)
 print("Total parameters (M):", total_params / 1e6)
 print("Trainable parameters:", trainable_params)
 
+
 x = torch.randn(2, 3, 256, 128).to(device)
 labels = torch.tensor([0, 1]).to(device)
 

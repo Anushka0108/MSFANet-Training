@@ -144,14 +144,20 @@ class MSFANetEngine(Engine):
             use_metric_cuhk03=use_metric_cuhk03
         )
 
+        rank1 = float(cmc[0])
+        rank5 = float(cmc[4])
+        rank10 = float(cmc[9])
+        rank20 = float(cmc[19])
+        mean_ap = float(mean_ap)
+
         row = {
             "epoch": self.epoch + 1,
             "dataset": dataset_name,
-            "rank1": float(cmc[0]),
-            "rank5": float(cmc[4]),
-            "rank10": float(cmc[9]),
-            "rank20": float(cmc[19]),
-            "mAP": float(mean_ap)
+            "rank1": rank1 * 100,
+            "rank5": rank5 * 100,
+            "rank10": rank10 * 100,
+            "rank20": rank20 * 100,
+            "mAP": mean_ap * 100
         }
         self.metric_history.append(row)
         self._save_metric_history()
@@ -164,11 +170,14 @@ class MSFANetEngine(Engine):
 
         print(
             f"MSFANet | Epoch {row['epoch']} | "
-            f"Rank-1 {row['rank1']:.4f} | Rank-5 {row['rank5']:.4f} | "
-            f"Rank-10 {row['rank10']:.4f} | Rank-20 {row['rank20']:.4f} | "
-            f"mAP {row['mAP']:.4f}"
+            f"Rank-1 {row['rank1']:.2f}% | "
+            f"Rank-5 {row['rank5']:.2f}% | "
+            f"Rank-10 {row['rank10']:.2f}% | "
+            f"Rank-20 {row['rank20']:.2f}% | "
+            f"mAP {row['mAP']:.2f}%"
         )
-        return row["rank1"], row["mAP"]
+
+        return rank1, mean_ap
 
     def _save_metric_history(self):
         if not self.metric_history:
