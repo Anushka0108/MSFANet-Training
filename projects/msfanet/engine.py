@@ -178,6 +178,26 @@ class MSFANetEngine(Engine):
         )
 
         return rank1, mean_ap
+    
+    def save_epoch_visualizations(self, epoch):
+        if epoch % 10 != 0:
+            return
+
+        query_loader = self.test_loader[
+            "market1501"
+        ]["query"]
+
+        sample_batch = next(iter(query_loader))
+
+        from visualization import save_feature_visualizations
+
+        save_feature_visualizations(
+            self.model,
+            sample_batch["img"],
+            self.output_dir,
+            epoch=epoch,
+            max_images=4
+        )
 
     def _save_metric_history(self):
         if not self.metric_history:

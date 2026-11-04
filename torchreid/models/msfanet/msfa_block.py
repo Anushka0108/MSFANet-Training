@@ -15,7 +15,7 @@ class MSFABlock(nn.Module):
         reduction=16
     ):
         super().__init__()
-
+        self.last_gate_visual_maps = []
         self.project = nn.Sequential(
             nn.Conv2d(
                 in_channels,
@@ -116,6 +116,12 @@ class MSFABlock(nn.Module):
             gate1.detach(),
             gate2.detach(),
             gate3.detach()
+        ]
+
+        self.last_gate_visual_maps = [
+            gate1.detach().mean(dim=1, keepdim=True),
+            gate2.detach().mean(dim=1, keepdim=True),
+            gate3.detach().mean(dim=1, keepdim=True)
         ]
 
         return self.activation(identity + fused)

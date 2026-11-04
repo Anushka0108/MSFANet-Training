@@ -119,7 +119,7 @@ class MSFANet(nn.Module):
 
         logits = self.classifier(features)
 
-        return logits, features
+        return logits, features 
 
         raise KeyError("Unsupported loss: {}".format(self.loss))
 
@@ -136,14 +136,12 @@ class MSFANet(nn.Module):
                     stage_name, block_index + 1
                 )
 
-                for branch_index, branch_map in enumerate(
-                    block.last_branch_maps
+                for branch_index, gate_map in enumerate(
+                    block.last_gate_visual_maps
                 ):
                     maps[
-                        "{}_branch{}".format(
-                            prefix, branch_index + 1
-                        )
-                    ] = branch_map
+                        "{}_gate{}".format(prefix, branch_index + 1)
+                    ] = gate_map
 
                 for branch_index, gate_map in enumerate(
                     block.last_gate_maps

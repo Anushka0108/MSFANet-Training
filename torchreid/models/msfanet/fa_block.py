@@ -6,7 +6,7 @@ class SEBlock(nn.Module):
     def __init__(self, channels, reduction=16):
         super().__init__()
         hidden = max(channels // reduction, 1)
-
+        
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.fc1 = nn.Conv2d(channels, hidden, 1)
         self.relu = nn.LeakyReLU(0.1, inplace=True)
