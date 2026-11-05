@@ -22,7 +22,7 @@ WIDTH = 128
 BATCH_SIZE = 128
 NUM_INSTANCES = 4
 WORKERS = 4
-INITIAL_LR = 0.065
+INITIAL_LR = 0.0003
 WEIGHT_DECAY = 5e-4
 OUTPUT_DIR = Path("log/msfanet_market1501_100ep")
 
@@ -75,7 +75,7 @@ def main():
         amsgrad=True
     )
 
-    milestones = [150, 225, 300, 350]
+    milestones = [40, 70, 90]
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer, milestones=milestones, gamma=0.1
     )
