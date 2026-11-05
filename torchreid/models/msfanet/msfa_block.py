@@ -103,7 +103,7 @@ class MSFABlock(nn.Module):
         g2 = b2 * gate2
         g3 = b3 * gate3
 
-        fused = g1 + g2 + g3
+        fused = torch.cat([g1, g2, g3], dim=1)
         fused = self.fuse(fused)
 
         self.last_branch_maps = [

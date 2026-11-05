@@ -99,7 +99,7 @@ def main():
         save_dir=str(OUTPUT_DIR),
         max_epoch=EPOCHS,
         print_freq=20,
-        eval_freq=1,
+        eval_freq=10,
         start_eval=1,
         ranks=[1, 5, 10, 20],
         normalize_feature=True
