@@ -1,0 +1,1797 @@
+
+================================================================================
+ENVIRONMENT
+================================================================================
+Python: 3.8.20 (default, Oct  3 2024, 15:24:27) 
+[GCC 11.2.0]
+PyTorch: 2.4.1+cpu
+CUDA available: False
+
+================================================================================
+GIT STATUS
+================================================================================
+
+
+================================================================================
+LATEST COMMIT
+================================================================================
+386f026 not done
+
+
+================================================================================
+projects/msfanet/train.py
+================================================================================
+import os
+import random
+from pathlib import Path
+
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+
+import torchreid
+from torchreid import models
+
+from augmentations import build_train_transform
+from complexity import calculate_complexity
+from engine import MSFANetEngine
+from visualization import save_feature_visualizations
+
+
+SEED = 42
+EPOCHS = 100
+HEIGHT = 256
+WIDTH = 128
+BATCH_SIZE = 128
+NUM_INSTANCES = 4
+WORKERS = 4
+INITIAL_LR = 0.0003
+WEIGHT_DECAY = 5e-4
+OUTPUT_DIR = Path("log/msfanet_market1501_100ep")
+
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def main():
+    set_seed(SEED)
+    torch.set_num_threads(max(1, min(4, os.cpu_count() or 1)))
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    use_gpu = torch.cuda.is_available()
+    print(f"Device: {'CUDA' if use_gpu else 'CPU'}")
+
+    datamanager = torchreid.data.ImageDataManager(
+        root="data",
+        sources="market1501",
+        targets="market1501",
+        height=HEIGHT,
+        width=WIDTH,
+        batch_size_train=BATCH_SIZE,
+        batch_size_test=100,
+        num_instances=NUM_INSTANCES,
+        train_sampler="RandomIdentitySampler",
+        workers=WORKERS,
+        transforms=["random_flip"]
+    )
+
+    datamanager.train_loader.dataset.transform = build_train_transform(HEIGHT, WIDTH)
+
+    model = models.build_model(
+        name="msfanet",
+        num_classes=datamanager.num_train_pids,
+        loss="softmax",
+        pretrained=False
+    )
+    if use_gpu:
+        model = model.cuda()
+
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=INITIAL_LR,
+        weight_decay=WEIGHT_DECAY,
+        amsgrad=True
+    )
+
+    milestones = [40, 70, 90]
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(
+        optimizer, milestones=milestones, gamma=0.1
+    )
+
+    complexity = calculate_complexity(model, HEIGHT, WIDTH)
+    print("Model complexity:", complexity)
+
+    engine = MSFANetEngine(
+        datamanager=datamanager,
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        weight_softmax=1.0,
+        weight_triplet=0.5,
+        triplet_margin=0.3,
+        use_gpu=use_gpu,
+        output_dir=str(OUTPUT_DIR)
+    )
+
+    engine.run(
+        save_dir=str(OUTPUT_DIR),
+        max_epoch=EPOCHS,
+        print_freq=20,
+        eval_freq=10,
+        start_eval=1,
+        ranks=[1, 5, 10, 20],
+        normalize_feature=True
+    )
+
+    complexity_path = OUTPUT_DIR / "model_complexity.txt"
+    with complexity_path.open("w") as handle:
+        for key, value in complexity.items():
+            handle.write(f"{key}: {value}\\n")
+
+    try:
+        from openpyxl import load_workbook
+        workbook_path = OUTPUT_DIR / "msfanet_results.xlsx"
+        workbook = load_workbook(workbook_path)
+        if "Training Batches" in workbook.sheetnames:
+            del workbook["Training Batches"]
+        training_sheet = workbook.create_sheet("Training Batches")
+        with (OUTPUT_DIR / "training_batches.csv").open(newline="") as csv_file:
+            for row in __import__("csv").reader(csv_file):
+                training_sheet.append(row)
+        if "Model Complexity" in workbook.sheetnames:
+            del workbook["Model Complexity"]
+        complexity_sheet = workbook.create_sheet("Model Complexity")
+        complexity_sheet.append(["Metric", "Value"])
+        for key, value in complexity.items():
+            complexity_sheet.append([key, value])
+        workbook.save(workbook_path)
+    except Exception as error:
+        print(f"Excel workbook update skipped: {error}")
+
+    sample_batch = next(iter(datamanager.test_loader["market1501"]["query"]))
+    save_feature_visualizations(
+        model,
+        sample_batch["img"],
+        OUTPUT_DIR,
+        epoch=EPOCHS,
+        max_images=4
+    )
+
+
+if __name__ == "__main__":
+    main()
+
+
+================================================================================
+projects/msfanet/losses.py
+================================================================================
+
+import torch
+import torch.nn.functional as F
+
+
+def batch_hard_triplet_loss(features, labels, margin=0.3):
+    features = F.normalize(features, p=2, dim=1)
+    distances = torch.cdist(features, features, p=2)
+
+    labels = labels.view(-1, 1)
+
+    positive_mask = labels.eq(labels.t())
+    negative_mask = labels.ne(labels.t())
+
+    positive_mask.fill_diagonal_(False)
+
+    hardest_positive = distances.masked_fill(
+        ~positive_mask, float("-inf")
+    ).max(dim=1).values
+
+    hardest_negative = distances.masked_fill(
+        ~negative_mask, float("inf")
+    ).min(dim=1).values
+
+    valid = (
+        torch.isfinite(hardest_positive)
+        & torch.isfinite(hardest_negative)
+    )
+
+    if not valid.any():
+        return features.sum() * 0.0
+
+    return F.relu(
+        hardest_positive[valid]
+        - hardest_negative[valid]
+        + margin
+    ).mean()
+
+
+================================================================================
+torchreid/engine/image/msfa_engine.py
+================================================================================
+FILE NOT FOUND
+
+================================================================================
+torchreid/models/msfanet/msfanet.py
+================================================================================
+import torch
+import torch.nn as nn
+
+from ..osnet import ConvLayer
+from .msfa_block import MSFABlock
+
+
+class MSFANet(nn.Module):
+    def __init__(
+        self,
+        num_classes,
+        loss="softmax",
+        pretrained=False,
+        widths=(128, 192, 256),
+        reduction=16,
+        **kwargs
+    ):
+        super().__init__()
+
+        self.loss = loss
+        self.feature_dim = 512
+        self.pretrained = pretrained
+
+        self.conv1 = ConvLayer(
+            3, 64, kernel_size=7, stride=2, padding=3
+        )
+
+        self.pool1 = nn.AvgPool2d(
+            kernel_size=3, stride=2, padding=1
+        )
+
+        self.stage1 = self._make_stage(
+            64, 256, blocks=1, width=widths[0], first_stride=1,
+            reduction=reduction
+        )
+
+        self.stage2 = self._make_stage(
+            256, 384, blocks=2, width=widths[1], first_stride=2,
+            reduction=reduction
+        )
+
+        self.stage3 = self._make_stage(
+            384, 512, blocks=3, width=widths[2], first_stride=2,
+            reduction=reduction
+        )
+
+        self.global_avgpool = nn.AdaptiveAvgPool2d(1)
+        self.classifier = nn.Linear(self.feature_dim, num_classes)
+
+        self.last_activation_map = None
+
+        self._initialize_weights()
+
+    def _make_stage(
+        self,
+        in_channels,
+        out_channels,
+        blocks,
+        width,
+        first_stride,
+        reduction
+    ):
+        layers = []
+
+        for index in range(blocks):
+            block_in = in_channels if index == 0 else out_channels
+            stride = first_stride if index == 0 else 1
+
+            layers.append(
+                MSFABlock(
+                    block_in,
+                    out_channels,
+                    width=width,
+                    stride=stride,
+                    reduction=reduction
+                )
+            )
+
+        return nn.Sequential(*layers)
+
+    def _initialize_weights(self):
+        for module in self.modules():
+            if isinstance(module, nn.Conv2d):
+                nn.init.kaiming_normal_(
+                    module.weight,
+                    mode="fan_out",
+                    nonlinearity="leaky_relu"
+                )
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+            elif isinstance(module, nn.BatchNorm2d):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+
+            elif isinstance(module, nn.Linear):
+                nn.init.normal_(module.weight, std=0.001)
+                nn.init.zeros_(module.bias)
+
+    def featuremaps(self, x):
+        x = self.conv1(x)
+        x = self.pool1(x)
+        x = self.stage1(x)
+        x = self.stage2(x)
+        x = self.stage3(x)
+
+        self.last_activation_map = (
+            x.detach().abs().mean(dim=1, keepdim=True)
+        )
+
+        return x
+
+    def forward(self, x):
+        x = self.featuremaps(x)
+        features = self.global_avgpool(x).flatten(1)
+
+        if not self.training:
+            return features
+
+        logits = self.classifier(features)
+
+        return logits, features 
+
+        raise KeyError("Unsupported loss: {}".format(self.loss))
+
+    def get_visual_maps(self):
+        maps = {
+            "final_activation": self.last_activation_map
+        }
+
+        for stage_name in ("stage1", "stage2", "stage3"):
+            stage = getattr(self, stage_name)
+
+            for block_index, block in enumerate(stage):
+                prefix = "{}_block{}".format(
+                    stage_name, block_index + 1
+                )
+
+                for branch_index, gate_map in enumerate(
+                    block.last_gate_visual_maps
+                ):
+                    maps[
+                        "{}_gate{}".format(prefix, branch_index + 1)
+                    ] = gate_map
+
+                for branch_index, gate_map in enumerate(
+                    block.last_gate_maps
+                ):
+                    maps[
+                        "{}_gate{}".format(
+                            prefix, branch_index + 1
+                        )
+                    ] = gate_map
+
+                for branch_name in ("branch1", "branch2", "branch3"):
+                    branch = getattr(block, branch_name)
+
+                    for fa_index, fa in enumerate(branch):
+                        if fa.last_attention_map is not None:
+                            maps[
+                                "{}_{}_fa{}_se".format(
+                                    prefix,
+                                    branch_name,
+                                    fa_index + 1
+                                )
+                            ] = fa.last_attention_map
+
+        return maps
+
+
+def msfanet(
+    num_classes,
+    loss="softmax",
+    pretrained=False,
+    **kwargs
+):
+    return MSFANet(
+        num_classes=num_classes,
+        loss=loss,
+        pretrained=pretrained,
+        **kwargs
+    )
+
+
+================================================================================
+torchreid/models/msfanet/msfa_block.py
+================================================================================
+import torch
+import torch.nn as nn
+
+from .fa_block import FABlock
+from .aggregation_gate import AggregationGate
+
+
+class MSFABlock(nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        width,
+        stride=1,
+        reduction=16
+    ):
+        super().__init__()
+        self.last_gate_visual_maps = []
+        self.project = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                width,
+                kernel_size=1,
+                stride=stride,
+                bias=False
+            ),
+            nn.BatchNorm2d(width),
+            nn.LeakyReLU(0.1, inplace=True)
+        )
+
+        self.branch1 = nn.Sequential(
+            FABlock(width, reduction)
+        )
+
+        self.branch2 = nn.Sequential(
+            *[FABlock(width, reduction) for _ in range(3)]
+        )
+
+        self.branch3 = nn.Sequential(
+            *[FABlock(width, reduction) for _ in range(5)]
+        )
+
+        self.gates = nn.ModuleList([
+            AggregationGate(width, reduction),
+            AggregationGate(width, reduction),
+            AggregationGate(width, reduction)
+        ])
+
+        self.fuse = nn.Sequential(
+            nn.Conv2d(
+                width * 3,
+                out_channels,
+                kernel_size=1,
+                bias=False
+            ),
+            nn.BatchNorm2d(out_channels)
+        )
+
+        self.shortcut = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                out_channels,
+                kernel_size=1,
+                stride=stride,
+                bias=False
+            ),
+            nn.BatchNorm2d(out_channels)
+        )
+
+        self.activation = nn.LeakyReLU(0.1, inplace=True)
+        self.last_branch_maps = []
+        self.last_gate_maps = []
+
+    def forward(self, x):
+        identity = self.shortcut(x)
+        branch_input = self.project(x)
+
+        b1 = self.branch1(branch_input)
+
+        b2_outputs = []
+        value = branch_input
+        for block in self.branch2:
+            value = block(value)
+            b2_outputs.append(value)
+        b2 = b2_outputs[-1]
+
+        b3_outputs = []
+        value = branch_input
+        for block in self.branch3:
+            value = block(value)
+            b3_outputs.append(value)
+        b3 = b3_outputs[-1]
+
+        # Cross-branch averaging described in Equation (3).
+        b1 = 0.5 * (b1 + b2_outputs[0])
+        b2 = 0.5 * (b2 + b3_outputs[2])
+
+        gate1 = self.gates[0](branch_input)
+        gate2 = self.gates[1](branch_input)
+        gate3 = self.gates[2](branch_input)
+
+        g1 = b1 * gate1
+        g2 = b2 * gate2
+        g3 = b3 * gate3
+
+        fused = torch.cat([g1, g2, g3], dim=1)
+        fused = self.fuse(fused)
+
+        self.last_branch_maps = [
+            g1.detach().abs().mean(dim=1, keepdim=True),
+            g2.detach().abs().mean(dim=1, keepdim=True),
+            g3.detach().abs().mean(dim=1, keepdim=True)
+        ]
+
+        self.last_gate_maps = [
+            gate1.detach(),
+            gate2.detach(),
+            gate3.detach()
+        ]
+
+        self.last_gate_visual_maps = [
+            gate1.detach().mean(dim=1, keepdim=True),
+            gate2.detach().mean(dim=1, keepdim=True),
+            gate3.detach().mean(dim=1, keepdim=True)
+        ]
+
+        return self.activation(identity + fused)
+
+================================================================================
+torchreid/models/msfanet/fa_block.py
+================================================================================
+import torch
+import torch.nn as nn
+
+
+class SEBlock(nn.Module):
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        hidden = max(channels // reduction, 1)
+        
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc1 = nn.Conv2d(channels, hidden, 1)
+        self.relu = nn.LeakyReLU(0.1, inplace=True)
+        self.fc2 = nn.Conv2d(hidden, channels, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        weights = self.pool(x)
+        weights = self.fc1(weights)
+        weights = self.relu(weights)
+        weights = self.fc2(weights)
+        weights = self.sigmoid(weights)
+        return x * weights, weights
+
+
+class FABlock(nn.Module):
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+
+        self.pointwise = nn.Conv2d(
+            channels, channels, kernel_size=1, bias=False
+        )
+        self.depthwise = nn.Conv2d(
+            channels,
+            channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            groups=channels,
+            bias=False
+        )
+        self.bn = nn.BatchNorm2d(channels)
+        self.act = nn.LeakyReLU(0.1, inplace=True)
+        self.se = SEBlock(channels, reduction)
+        self.last_attention_map = None
+
+    def forward(self, x):
+        x = self.pointwise(x)
+        x = self.depthwise(x)
+        x = self.bn(x)
+        x = self.act(x)
+
+        x, weights = self.se(x)
+        self.last_attention_map = weights.detach()
+
+        return x
+
+
+================================================================================
+torchreid/models/msfanet/aggregation_gate.py
+================================================================================
+import torch.nn as nn
+
+from ..osnet import ChannelGate
+
+
+class AggregationGate(nn.Module):
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+
+        self.gate = ChannelGate(
+            channels,
+            return_gates=True,
+            reduction=reduction
+        )
+
+    def forward(self, x):
+        return self.gate(x)
+
+
+================================================================================
+torchreid/models/msfanet/se_block.py
+================================================================================
+import torch
+import torch.nn as nn
+
+
+class SEBlock(nn.Module):
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        hidden = max(channels // reduction, 1)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc1 = nn.Conv2d(channels, hidden, kernel_size=1, bias=True)
+        self.act = nn.LeakyReLU(0.1, inplace=True)
+        self.fc2 = nn.Conv2d(hidden, channels, kernel_size=1, bias=True)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        weights = self.pool(x)
+        weights = self.fc1(weights)
+        weights = self.act(weights)
+        weights = self.fc2(weights)
+        weights = self.sigmoid(weights)
+        return x * weights, weights
+
+================================================================================
+torchreid/engine/engine.py
+================================================================================
+from __future__ import division, print_function, absolute_import
+import time
+import numpy as np
+import os.path as osp
+import datetime
+from collections import OrderedDict
+import torch
+from torch.nn import functional as F
+from torch.utils.tensorboard import SummaryWriter
+
+from torchreid import metrics
+from torchreid.utils import (
+    MetricMeter, AverageMeter, re_ranking, open_all_layers, save_checkpoint,
+    open_specified_layers, visualize_ranked_results
+)
+from torchreid.losses import DeepSupervision
+
+
+class Engine(object):
+    r"""A generic base Engine class for both image- and video-reid.
+
+    Args:
+        datamanager (DataManager): an instance of ``torchreid.data.ImageDataManager``
+            or ``torchreid.data.VideoDataManager``.
+        use_gpu (bool, optional): use gpu. Default is True.
+    """
+
+    def __init__(self, datamanager, use_gpu=True):
+        self.datamanager = datamanager
+        self.train_loader = self.datamanager.train_loader
+        self.test_loader = self.datamanager.test_loader
+        self.use_gpu = (torch.cuda.is_available() and use_gpu)
+        self.writer = None
+        self.epoch = 0
+
+        self.model = None
+        self.optimizer = None
+        self.scheduler = None
+
+        self._models = OrderedDict()
+        self._optims = OrderedDict()
+        self._scheds = OrderedDict()
+
+    def register_model(self, name='model', model=None, optim=None, sched=None):
+        if self.__dict__.get('_models') is None:
+            raise AttributeError(
+                'Cannot assign model before super().__init__() call'
+            )
+
+        if self.__dict__.get('_optims') is None:
+            raise AttributeError(
+                'Cannot assign optim before super().__init__() call'
+            )
+
+        if self.__dict__.get('_scheds') is None:
+            raise AttributeError(
+                'Cannot assign sched before super().__init__() call'
+            )
+
+        self._models[name] = model
+        self._optims[name] = optim
+        self._scheds[name] = sched
+
+    def get_model_names(self, names=None):
+        names_real = list(self._models.keys())
+        if names is not None:
+            if not isinstance(names, list):
+                names = [names]
+            for name in names:
+                assert name in names_real
+            return names
+        else:
+            return names_real
+
+    def save_model(self, epoch, rank1, save_dir, is_best=False):
+        names = self.get_model_names()
+
+        for name in names:
+            save_checkpoint(
+                {
+                    'state_dict': self._models[name].state_dict(),
+                    'epoch': epoch + 1,
+                    'rank1': rank1,
+                    'optimizer': self._optims[name].state_dict(),
+                    'scheduler': self._scheds[name].state_dict()
+                },
+                osp.join(save_dir, name),
+                is_best=is_best
+            )
+
+    def set_model_mode(self, mode='train', names=None):
+        assert mode in ['train', 'eval', 'test']
+        names = self.get_model_names(names)
+
+        for name in names:
+            if mode == 'train':
+                self._models[name].train()
+            else:
+                self._models[name].eval()
+
+    def get_current_lr(self, names=None):
+        names = self.get_model_names(names)
+        name = names[0]
+        return self._optims[name].param_groups[-1]['lr']
+
+    def update_lr(self, names=None):
+        names = self.get_model_names(names)
+
+        for name in names:
+            if self._scheds[name] is not None:
+                self._scheds[name].step()
+
+    def run(
+        self,
+        save_dir='log',
+        max_epoch=0,
+        start_epoch=0,
+        print_freq=10,
+        fixbase_epoch=0,
+        open_layers=None,
+        start_eval=0,
+        eval_freq=-1,
+        test_only=False,
+        dist_metric='euclidean',
+        normalize_feature=False,
+        visrank=False,
+        visrank_topk=10,
+        use_metric_cuhk03=False,
+        ranks=[1, 5, 10, 20],
+        rerank=False
+    ):
+        r"""A unified pipeline for training and evaluating a model.
+
+        Args:
+            save_dir (str): directory to save model.
+            max_epoch (int): maximum epoch.
+            start_epoch (int, optional): starting epoch. Default is 0.
+            print_freq (int, optional): print_frequency. Default is 10.
+            fixbase_epoch (int, optional): number of epochs to train ``open_layers`` (new layers)
+                while keeping base layers frozen. Default is 0. ``fixbase_epoch`` is counted
+                in ``max_epoch``.
+            open_layers (str or list, optional): layers (attribute names) open for training.
+            start_eval (int, optional): from which epoch to start evaluation. Default is 0.
+            eval_freq (int, optional): evaluation frequency. Default is -1 (meaning evaluation
+                is only performed at the end of training).
+            test_only (bool, optional): if True, only runs evaluation on test datasets.
+                Default is False.
+            dist_metric (str, optional): distance metric used to compute distance matrix
+                between query and gallery. Default is "euclidean".
+            normalize_feature (bool, optional): performs L2 normalization on feature vectors before
+                computing feature distance. Default is False.
+            visrank (bool, optional): visualizes ranked results. Default is False. It is recommended to
+                enable ``visrank`` when ``test_only`` is True. The ranked images will be saved to
+                "save_dir/visrank_dataset", e.g. "save_dir/visrank_market1501".
+            visrank_topk (int, optional): top-k ranked images to be visualized. Default is 10.
+            use_metric_cuhk03 (bool, optional): use single-gallery-shot setting for cuhk03.
+                Default is False. This should be enabled when using cuhk03 classic split.
+            ranks (list, optional): cmc ranks to be computed. Default is [1, 5, 10, 20].
+            rerank (bool, optional): uses person re-ranking (by Zhong et al. CVPR'17).
+                Default is False. This is only enabled when test_only=True.
+        """
+
+        if visrank and not test_only:
+            raise ValueError(
+                'visrank can be set to True only if test_only=True'
+            )
+
+        if test_only:
+            self.test(
+                dist_metric=dist_metric,
+                normalize_feature=normalize_feature,
+                visrank=visrank,
+                visrank_topk=visrank_topk,
+                save_dir=save_dir,
+                use_metric_cuhk03=use_metric_cuhk03,
+                ranks=ranks,
+                rerank=rerank
+            )
+            return
+
+        if self.writer is None:
+            self.writer = SummaryWriter(log_dir=save_dir)
+
+        time_start = time.time()
+        self.start_epoch = start_epoch
+        self.max_epoch = max_epoch
+        print('=> Start training')
+
+        for self.epoch in range(self.start_epoch, self.max_epoch):
+            self.train(
+                print_freq=print_freq,
+                fixbase_epoch=fixbase_epoch,
+                open_layers=open_layers
+            )
+
+            if (self.epoch + 1) >= start_eval \
+               and eval_freq > 0 \
+               and (self.epoch+1) % eval_freq == 0 \
+               and (self.epoch + 1) != self.max_epoch:
+                rank1 = self.test(
+                    dist_metric=dist_metric,
+                    normalize_feature=normalize_feature,
+                    visrank=visrank,
+                    visrank_topk=visrank_topk,
+                    save_dir=save_dir,
+                    use_metric_cuhk03=use_metric_cuhk03,
+                    ranks=ranks
+                )
+                self.save_model(self.epoch, rank1, save_dir)
+
+        if self.max_epoch > 0:
+            print('=> Final test')
+            rank1 = self.test(
+                dist_metric=dist_metric,
+                normalize_feature=normalize_feature,
+                visrank=visrank,
+                visrank_topk=visrank_topk,
+                save_dir=save_dir,
+                use_metric_cuhk03=use_metric_cuhk03,
+                ranks=ranks
+            )
+            self.save_model(self.epoch, rank1, save_dir)
+
+        elapsed = round(time.time() - time_start)
+        elapsed = str(datetime.timedelta(seconds=elapsed))
+        print('Elapsed {}'.format(elapsed))
+        if self.writer is not None:
+            self.writer.close()
+
+    def train(self, print_freq=10, fixbase_epoch=0, open_layers=None):
+        losses = MetricMeter()
+        batch_time = AverageMeter()
+        data_time = AverageMeter()
+
+        self.set_model_mode('train')
+
+        self.two_stepped_transfer_learning(
+            self.epoch, fixbase_epoch, open_layers
+        )
+
+        self.num_batches = len(self.train_loader)
+        end = time.time()
+        for self.batch_idx, data in enumerate(self.train_loader):
+            data_time.update(time.time() - end)
+            loss_summary = self.forward_backward(data)
+            batch_time.update(time.time() - end)
+            losses.update(loss_summary)
+
+            if (self.batch_idx + 1) % print_freq == 0:
+                nb_this_epoch = self.num_batches - (self.batch_idx + 1)
+                nb_future_epochs = (
+                    self.max_epoch - (self.epoch + 1)
+                ) * self.num_batches
+                eta_seconds = batch_time.avg * (nb_this_epoch+nb_future_epochs)
+                eta_str = str(datetime.timedelta(seconds=int(eta_seconds)))
+                print(
+                    'epoch: [{0}/{1}][{2}/{3}]\t'
+                    'time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                    'data {data_time.val:.3f} ({data_time.avg:.3f})\t'
+                    'eta {eta}\t'
+                    '{losses}\t'
+                    'lr {lr:.6f}'.format(
+                        self.epoch + 1,
+                        self.max_epoch,
+                        self.batch_idx + 1,
+                        self.num_batches,
+                        batch_time=batch_time,
+                        data_time=data_time,
+                        eta=eta_str,
+                        losses=losses,
+                        lr=self.get_current_lr()
+                    )
+                )
+
+            if self.writer is not None:
+                n_iter = self.epoch * self.num_batches + self.batch_idx
+                self.writer.add_scalar('Train/time', batch_time.avg, n_iter)
+                self.writer.add_scalar('Train/data', data_time.avg, n_iter)
+                for name, meter in losses.meters.items():
+                    self.writer.add_scalar('Train/' + name, meter.avg, n_iter)
+                self.writer.add_scalar(
+                    'Train/lr', self.get_current_lr(), n_iter
+                )
+
+            end = time.time()
+
+        self.update_lr()
+
+    def forward_backward(self, data):
+        raise NotImplementedError
+
+    def test(
+        self,
+        dist_metric='euclidean',
+        normalize_feature=False,
+        visrank=False,
+        visrank_topk=10,
+        save_dir='',
+        use_metric_cuhk03=False,
+        ranks=[1, 5, 10, 20],
+        rerank=False
+    ):
+        r"""Tests model on target datasets.
+
+        .. note::
+
+            This function has been called in ``run()``.
+
+        .. note::
+
+            The test pipeline implemented in this function suits both image- and
+            video-reid. In general, a subclass of Engine only needs to re-implement
+            ``extract_features()`` and ``parse_data_for_eval()`` (most of the time),
+            but not a must. Please refer to the source code for more details.
+        """
+        self.set_model_mode('eval')
+        targets = list(self.test_loader.keys())
+
+        for name in targets:
+            domain = 'source' if name in self.datamanager.sources else 'target'
+            print('##### Evaluating {} ({}) #####'.format(name, domain))
+            query_loader = self.test_loader[name]['query']
+            gallery_loader = self.test_loader[name]['gallery']
+            rank1, mAP = self._evaluate(
+                dataset_name=name,
+                query_loader=query_loader,
+                gallery_loader=gallery_loader,
+                dist_metric=dist_metric,
+                normalize_feature=normalize_feature,
+                visrank=visrank,
+                visrank_topk=visrank_topk,
+                save_dir=save_dir,
+                use_metric_cuhk03=use_metric_cuhk03,
+                ranks=ranks,
+                rerank=rerank
+            )
+
+            if self.writer is not None:
+                self.writer.add_scalar(f'Test/{name}/rank1', rank1, self.epoch)
+                self.writer.add_scalar(f'Test/{name}/mAP', mAP, self.epoch)
+
+        return rank1
+
+    @torch.no_grad()
+    def _evaluate(
+        self,
+        dataset_name='',
+        query_loader=None,
+        gallery_loader=None,
+        dist_metric='euclidean',
+        normalize_feature=False,
+        visrank=False,
+        visrank_topk=10,
+        save_dir='',
+        use_metric_cuhk03=False,
+        ranks=[1, 5, 10, 20],
+        rerank=False
+    ):
+        batch_time = AverageMeter()
+
+        def _feature_extraction(data_loader):
+            f_, pids_, camids_ = [], [], []
+            for batch_idx, data in enumerate(data_loader):
+                imgs, pids, camids = self.parse_data_for_eval(data)
+                if self.use_gpu:
+                    imgs = imgs.cuda()
+                end = time.time()
+                features = self.extract_features(imgs)
+                batch_time.update(time.time() - end)
+                features = features.cpu()
+                f_.append(features)
+                pids_.extend(pids.tolist())
+                camids_.extend(camids.tolist())
+            f_ = torch.cat(f_, 0)
+            pids_ = np.asarray(pids_)
+            camids_ = np.asarray(camids_)
+            return f_, pids_, camids_
+
+        print('Extracting features from query set ...')
+        qf, q_pids, q_camids = _feature_extraction(query_loader)
+        print('Done, obtained {}-by-{} matrix'.format(qf.size(0), qf.size(1)))
+
+        print('Extracting features from gallery set ...')
+        gf, g_pids, g_camids = _feature_extraction(gallery_loader)
+        print('Done, obtained {}-by-{} matrix'.format(gf.size(0), gf.size(1)))
+
+        print('Speed: {:.4f} sec/batch'.format(batch_time.avg))
+
+        if normalize_feature:
+            print('Normalzing features with L2 norm ...')
+            qf = F.normalize(qf, p=2, dim=1)
+            gf = F.normalize(gf, p=2, dim=1)
+
+        print(
+            'Computing distance matrix with metric={} ...'.format(dist_metric)
+        )
+        distmat = metrics.compute_distance_matrix(qf, gf, dist_metric)
+        distmat = distmat.numpy()
+
+        if rerank:
+            print('Applying person re-ranking ...')
+            distmat_qq = metrics.compute_distance_matrix(qf, qf, dist_metric)
+            distmat_gg = metrics.compute_distance_matrix(gf, gf, dist_metric)
+            distmat = re_ranking(distmat, distmat_qq, distmat_gg)
+
+        print('Computing CMC and mAP ...')
+        cmc, mAP = metrics.evaluate_rank(
+            distmat,
+            q_pids,
+            g_pids,
+            q_camids,
+            g_camids,
+            use_metric_cuhk03=use_metric_cuhk03
+        )
+
+        print('** Results **')
+        print('mAP: {:.1%}'.format(mAP))
+        print('CMC curve')
+        for r in ranks:
+            print('Rank-{:<3}: {:.1%}'.format(r, cmc[r - 1]))
+
+        if visrank:
+            visualize_ranked_results(
+                distmat,
+                self.datamanager.fetch_test_loaders(dataset_name),
+                self.datamanager.data_type,
+                width=self.datamanager.width,
+                height=self.datamanager.height,
+                save_dir=osp.join(save_dir, 'visrank_' + dataset_name),
+                topk=visrank_topk
+            )
+
+        return cmc[0], mAP
+
+    def compute_loss(self, criterion, outputs, targets):
+        if isinstance(outputs, (tuple, list)):
+            loss = DeepSupervision(criterion, outputs, targets)
+        else:
+            loss = criterion(outputs, targets)
+        return loss
+
+    def extract_features(self, input):
+        return self.model(input)
+
+    def parse_data_for_train(self, data):
+        imgs = data['img']
+        pids = data['pid']
+        return imgs, pids
+
+    def parse_data_for_eval(self, data):
+        imgs = data['img']
+        pids = data['pid']
+        camids = data['camid']
+        return imgs, pids, camids
+
+    def two_stepped_transfer_learning(
+        self, epoch, fixbase_epoch, open_layers, model=None
+    ):
+        """Two-stepped transfer learning.
+
+        The idea is to freeze base layers for a certain number of epochs
+        and then open all layers for training.
+
+        Reference: https://arxiv.org/abs/1611.05244
+        """
+        model = self.model if model is None else model
+        if model is None:
+            return
+
+        if (epoch + 1) <= fixbase_epoch and open_layers is not None:
+            print(
+                '* Only train {} (epoch: {}/{})'.format(
+                    open_layers, epoch + 1, fixbase_epoch
+                )
+            )
+            open_specified_layers(model, open_layers)
+        else:
+            open_all_layers(model)
+
+
+================================================================================
+torchreid/metrics/rank.py
+================================================================================
+from __future__ import division, print_function, absolute_import
+import numpy as np
+import warnings
+from collections import defaultdict
+
+try:
+    from torchreid.metrics.rank_cylib.rank_cy import evaluate_cy
+    IS_CYTHON_AVAI = True
+except ImportError:
+    IS_CYTHON_AVAI = False
+    warnings.warn(
+        'Cython evaluation (very fast so highly recommended) is '
+        'unavailable, now use python evaluation.'
+    )
+
+
+def eval_cuhk03(distmat, q_pids, g_pids, q_camids, g_camids, max_rank):
+    """Evaluation with cuhk03 metric
+    Key: one image for each gallery identity is randomly sampled for each query identity.
+    Random sampling is performed num_repeats times.
+    """
+    num_repeats = 10
+    num_q, num_g = distmat.shape
+
+    if num_g < max_rank:
+        max_rank = num_g
+        print(
+            'Note: number of gallery samples is quite small, got {}'.
+            format(num_g)
+        )
+
+    indices = np.argsort(distmat, axis=1)
+    matches = (g_pids[indices] == q_pids[:, np.newaxis]).astype(np.int32)
+
+    # compute cmc curve for each query
+    all_cmc = []
+    all_AP = []
+    num_valid_q = 0. # number of valid query
+
+    for q_idx in range(num_q):
+        # get query pid and camid
+        q_pid = q_pids[q_idx]
+        q_camid = q_camids[q_idx]
+
+        # remove gallery samples that have the same pid and camid with query
+        order = indices[q_idx]
+        remove = (g_pids[order] == q_pid) & (g_camids[order] == q_camid)
+        keep = np.invert(remove)
+
+        # compute cmc curve
+        raw_cmc = matches[q_idx][
+            keep] # binary vector, positions with value 1 are correct matches
+        if not np.any(raw_cmc):
+            # this condition is true when query identity does not appear in gallery
+            continue
+
+        kept_g_pids = g_pids[order][keep]
+        g_pids_dict = defaultdict(list)
+        for idx, pid in enumerate(kept_g_pids):
+            g_pids_dict[pid].append(idx)
+
+        cmc = 0.
+        for repeat_idx in range(num_repeats):
+            mask = np.zeros(len(raw_cmc), dtype=np.bool)
+            for _, idxs in g_pids_dict.items():
+                # randomly sample one image for each gallery person
+                rnd_idx = np.random.choice(idxs)
+                mask[rnd_idx] = True
+            masked_raw_cmc = raw_cmc[mask]
+            _cmc = masked_raw_cmc.cumsum()
+            _cmc[_cmc > 1] = 1
+            cmc += _cmc[:max_rank].astype(np.float32)
+
+        cmc /= num_repeats
+        all_cmc.append(cmc)
+        # compute AP
+        num_rel = raw_cmc.sum()
+        tmp_cmc = raw_cmc.cumsum()
+        tmp_cmc = [x / (i+1.) for i, x in enumerate(tmp_cmc)]
+        tmp_cmc = np.asarray(tmp_cmc) * raw_cmc
+        AP = tmp_cmc.sum() / num_rel
+        all_AP.append(AP)
+        num_valid_q += 1.
+
+    assert num_valid_q > 0, 'Error: all query identities do not appear in gallery'
+
+    all_cmc = np.asarray(all_cmc).astype(np.float32)
+    all_cmc = all_cmc.sum(0) / num_valid_q
+    mAP = np.mean(all_AP)
+
+    return all_cmc, mAP
+
+
+def eval_market1501(distmat, q_pids, g_pids, q_camids, g_camids, max_rank):
+    """Evaluation with market1501 metric
+    Key: for each query identity, its gallery images from the same camera view are discarded.
+    """
+    num_q, num_g = distmat.shape
+
+    if num_g < max_rank:
+        max_rank = num_g
+        print(
+            'Note: number of gallery samples is quite small, got {}'.
+            format(num_g)
+        )
+
+    indices = np.argsort(distmat, axis=1)
+    matches = (g_pids[indices] == q_pids[:, np.newaxis]).astype(np.int32)
+
+    # compute cmc curve for each query
+    all_cmc = []
+    all_AP = []
+    num_valid_q = 0. # number of valid query
+
+    for q_idx in range(num_q):
+        # get query pid and camid
+        q_pid = q_pids[q_idx]
+        q_camid = q_camids[q_idx]
+
+        # remove gallery samples that have the same pid and camid with query
+        order = indices[q_idx]
+        remove = (g_pids[order] == q_pid) & (g_camids[order] == q_camid)
+        keep = np.invert(remove)
+
+        # compute cmc curve
+        raw_cmc = matches[q_idx][
+            keep] # binary vector, positions with value 1 are correct matches
+        if not np.any(raw_cmc):
+            # this condition is true when query identity does not appear in gallery
+            continue
+
+        cmc = raw_cmc.cumsum()
+        cmc[cmc > 1] = 1
+
+        all_cmc.append(cmc[:max_rank])
+        num_valid_q += 1.
+
+        # compute average precision
+        # reference: https://en.wikipedia.org/wiki/Evaluation_measures_(information_retrieval)#Average_precision
+        num_rel = raw_cmc.sum()
+        tmp_cmc = raw_cmc.cumsum()
+        tmp_cmc = [x / (i+1.) for i, x in enumerate(tmp_cmc)]
+        tmp_cmc = np.asarray(tmp_cmc) * raw_cmc
+        AP = tmp_cmc.sum() / num_rel
+        all_AP.append(AP)
+
+    assert num_valid_q > 0, 'Error: all query identities do not appear in gallery'
+
+    all_cmc = np.asarray(all_cmc).astype(np.float32)
+    all_cmc = all_cmc.sum(0) / num_valid_q
+    mAP = np.mean(all_AP)
+
+    return all_cmc, mAP
+
+
+def evaluate_py(
+    distmat, q_pids, g_pids, q_camids, g_camids, max_rank, use_metric_cuhk03
+):
+    if use_metric_cuhk03:
+        return eval_cuhk03(
+            distmat, q_pids, g_pids, q_camids, g_camids, max_rank
+        )
+    else:
+        return eval_market1501(
+            distmat, q_pids, g_pids, q_camids, g_camids, max_rank
+        )
+
+
+def evaluate_rank(
+    distmat,
+    q_pids,
+    g_pids,
+    q_camids,
+    g_camids,
+    max_rank=50,
+    use_metric_cuhk03=False,
+    use_cython=True
+):
+    """Evaluates CMC rank.
+
+    Args:
+        distmat (numpy.ndarray): distance matrix of shape (num_query, num_gallery).
+        q_pids (numpy.ndarray): 1-D array containing person identities
+            of each query instance.
+        g_pids (numpy.ndarray): 1-D array containing person identities
+            of each gallery instance.
+        q_camids (numpy.ndarray): 1-D array containing camera views under
+            which each query instance is captured.
+        g_camids (numpy.ndarray): 1-D array containing camera views under
+            which each gallery instance is captured.
+        max_rank (int, optional): maximum CMC rank to be computed. Default is 50.
+        use_metric_cuhk03 (bool, optional): use single-gallery-shot setting for cuhk03.
+            Default is False. This should be enabled when using cuhk03 classic split.
+        use_cython (bool, optional): use cython code for evaluation. Default is True.
+            This is highly recommended as the cython code can speed up the cmc computation
+            by more than 10x. This requires Cython to be installed.
+    """
+    if use_cython and IS_CYTHON_AVAI:
+        return evaluate_cy(
+            distmat, q_pids, g_pids, q_camids, g_camids, max_rank,
+            use_metric_cuhk03
+        )
+    else:
+        return evaluate_py(
+            distmat, q_pids, g_pids, q_camids, g_camids, max_rank,
+            use_metric_cuhk03
+        )
+
+
+================================================================================
+torchreid/metrics/distance.py
+================================================================================
+from __future__ import division, print_function, absolute_import
+import torch
+from torch.nn import functional as F
+
+
+def compute_distance_matrix(input1, input2, metric='euclidean'):
+    """A wrapper function for computing distance matrix.
+
+    Args:
+        input1 (torch.Tensor): 2-D feature matrix.
+        input2 (torch.Tensor): 2-D feature matrix.
+        metric (str, optional): "euclidean" or "cosine".
+            Default is "euclidean".
+
+    Returns:
+        torch.Tensor: distance matrix.
+
+    Examples::
+       >>> from torchreid import metrics
+       >>> input1 = torch.rand(10, 2048)
+       >>> input2 = torch.rand(100, 2048)
+       >>> distmat = metrics.compute_distance_matrix(input1, input2)
+       >>> distmat.size() # (10, 100)
+    """
+    # check input
+    assert isinstance(input1, torch.Tensor)
+    assert isinstance(input2, torch.Tensor)
+    assert input1.dim() == 2, 'Expected 2-D tensor, but got {}-D'.format(
+        input1.dim()
+    )
+    assert input2.dim() == 2, 'Expected 2-D tensor, but got {}-D'.format(
+        input2.dim()
+    )
+    assert input1.size(1) == input2.size(1)
+
+    if metric == 'euclidean':
+        distmat = euclidean_squared_distance(input1, input2)
+    elif metric == 'cosine':
+        distmat = cosine_distance(input1, input2)
+    else:
+        raise ValueError(
+            'Unknown distance metric: {}. '
+            'Please choose either "euclidean" or "cosine"'.format(metric)
+        )
+
+    return distmat
+
+
+def euclidean_squared_distance(input1, input2):
+    """Computes euclidean squared distance.
+
+    Args:
+        input1 (torch.Tensor): 2-D feature matrix.
+        input2 (torch.Tensor): 2-D feature matrix.
+
+    Returns:
+        torch.Tensor: distance matrix.
+    """
+    m, n = input1.size(0), input2.size(0)
+    mat1 = torch.pow(input1, 2).sum(dim=1, keepdim=True).expand(m, n)
+    mat2 = torch.pow(input2, 2).sum(dim=1, keepdim=True).expand(n, m).t()
+    distmat = mat1 + mat2
+    distmat.addmm_(input1, input2.t(), beta=1, alpha=-2)
+    return distmat
+
+
+def cosine_distance(input1, input2):
+    """Computes cosine distance.
+
+    Args:
+        input1 (torch.Tensor): 2-D feature matrix.
+        input2 (torch.Tensor): 2-D feature matrix.
+
+    Returns:
+        torch.Tensor: distance matrix.
+    """
+    input1_normed = F.normalize(input1, p=2, dim=1)
+    input2_normed = F.normalize(input2, p=2, dim=1)
+    distmat = 1 - torch.mm(input1_normed, input2_normed.t())
+    return distmat
+
+
+================================================================================
+torchreid/data/sampler.py
+================================================================================
+from __future__ import division, absolute_import
+import copy
+import numpy as np
+import random
+from collections import defaultdict
+from torch.utils.data.sampler import Sampler, RandomSampler, SequentialSampler
+
+AVAI_SAMPLERS = [
+    'RandomIdentitySampler', 'SequentialSampler', 'RandomSampler',
+    'RandomDomainSampler', 'RandomDatasetSampler'
+]
+
+
+class RandomIdentitySampler(Sampler):
+    """Randomly samples N identities each with K instances.
+
+    Args:
+        data_source (list): contains tuples of (img_path(s), pid, camid, dsetid).
+        batch_size (int): batch size.
+        num_instances (int): number of instances per identity in a batch.
+    """
+
+    def __init__(self, data_source, batch_size, num_instances):
+        if batch_size < num_instances:
+            raise ValueError(
+                'batch_size={} must be no less '
+                'than num_instances={}'.format(batch_size, num_instances)
+            )
+
+        self.data_source = data_source
+        self.batch_size = batch_size
+        self.num_instances = num_instances
+        self.num_pids_per_batch = self.batch_size // self.num_instances
+        self.index_dic = defaultdict(list)
+        for index, items in enumerate(data_source):
+            pid = items[1]
+            self.index_dic[pid].append(index)
+        self.pids = list(self.index_dic.keys())
+        assert len(self.pids) >= self.num_pids_per_batch
+
+        # estimate number of examples in an epoch
+        # TODO: improve precision
+        self.length = 0
+        for pid in self.pids:
+            idxs = self.index_dic[pid]
+            num = len(idxs)
+            if num < self.num_instances:
+                num = self.num_instances
+            self.length += num - num % self.num_instances
+
+    def __iter__(self):
+        batch_idxs_dict = defaultdict(list)
+
+        for pid in self.pids:
+            idxs = copy.deepcopy(self.index_dic[pid])
+            if len(idxs) < self.num_instances:
+                idxs = np.random.choice(
+                    idxs, size=self.num_instances, replace=True
+                )
+            random.shuffle(idxs)
+            batch_idxs = []
+            for idx in idxs:
+                batch_idxs.append(idx)
+                if len(batch_idxs) == self.num_instances:
+                    batch_idxs_dict[pid].append(batch_idxs)
+                    batch_idxs = []
+
+        avai_pids = copy.deepcopy(self.pids)
+        final_idxs = []
+
+        while len(avai_pids) >= self.num_pids_per_batch:
+            selected_pids = random.sample(avai_pids, self.num_pids_per_batch)
+            for pid in selected_pids:
+                batch_idxs = batch_idxs_dict[pid].pop(0)
+                final_idxs.extend(batch_idxs)
+                if len(batch_idxs_dict[pid]) == 0:
+                    avai_pids.remove(pid)
+
+        return iter(final_idxs)
+
+    def __len__(self):
+        return self.length
+
+
+class RandomDomainSampler(Sampler):
+    """Random domain sampler.
+
+    We consider each camera as a visual domain.
+
+    How does the sampling work:
+    1. Randomly sample N cameras (based on the "camid" label).
+    2. From each camera, randomly sample K images.
+
+    Args:
+        data_source (list): contains tuples of (img_path(s), pid, camid, dsetid).
+        batch_size (int): batch size.
+        n_domain (int): number of cameras to sample in a batch.
+    """
+
+    def __init__(self, data_source, batch_size, n_domain):
+        self.data_source = data_source
+
+        # Keep track of image indices for each domain
+        self.domain_dict = defaultdict(list)
+        for i, items in enumerate(data_source):
+            camid = items[2]
+            self.domain_dict[camid].append(i)
+        self.domains = list(self.domain_dict.keys())
+
+        # Make sure each domain can be assigned an equal number of images
+        if n_domain is None or n_domain <= 0:
+            n_domain = len(self.domains)
+        assert batch_size % n_domain == 0
+        self.n_img_per_domain = batch_size // n_domain
+
+        self.batch_size = batch_size
+        self.n_domain = n_domain
+        self.length = len(list(self.__iter__()))
+
+    def __iter__(self):
+        domain_dict = copy.deepcopy(self.domain_dict)
+        final_idxs = []
+        stop_sampling = False
+
+        while not stop_sampling:
+            selected_domains = random.sample(self.domains, self.n_domain)
+
+            for domain in selected_domains:
+                idxs = domain_dict[domain]
+                selected_idxs = random.sample(idxs, self.n_img_per_domain)
+                final_idxs.extend(selected_idxs)
+
+                for idx in selected_idxs:
+                    domain_dict[domain].remove(idx)
+
+                remaining = len(domain_dict[domain])
+                if remaining < self.n_img_per_domain:
+                    stop_sampling = True
+
+        return iter(final_idxs)
+
+    def __len__(self):
+        return self.length
+
+
+class RandomDatasetSampler(Sampler):
+    """Random dataset sampler.
+
+    How does the sampling work:
+    1. Randomly sample N datasets (based on the "dsetid" label).
+    2. From each dataset, randomly sample K images.
+
+    Args:
+        data_source (list): contains tuples of (img_path(s), pid, camid, dsetid).
+        batch_size (int): batch size.
+        n_dataset (int): number of datasets to sample in a batch.
+    """
+
+    def __init__(self, data_source, batch_size, n_dataset):
+        self.data_source = data_source
+
+        # Keep track of image indices for each dataset
+        self.dataset_dict = defaultdict(list)
+        for i, items in enumerate(data_source):
+            dsetid = items[3]
+            self.dataset_dict[dsetid].append(i)
+        self.datasets = list(self.dataset_dict.keys())
+
+        # Make sure each dataset can be assigned an equal number of images
+        if n_dataset is None or n_dataset <= 0:
+            n_dataset = len(self.datasets)
+        assert batch_size % n_dataset == 0
+        self.n_img_per_dset = batch_size // n_dataset
+
+        self.batch_size = batch_size
+        self.n_dataset = n_dataset
+        self.length = len(list(self.__iter__()))
+
+    def __iter__(self):
+        dataset_dict = copy.deepcopy(self.dataset_dict)
+        final_idxs = []
+        stop_sampling = False
+
+        while not stop_sampling:
+            selected_datasets = random.sample(self.datasets, self.n_dataset)
+
+            for dset in selected_datasets:
+                idxs = dataset_dict[dset]
+                selected_idxs = random.sample(idxs, self.n_img_per_dset)
+                final_idxs.extend(selected_idxs)
+
+                for idx in selected_idxs:
+                    dataset_dict[dset].remove(idx)
+
+                remaining = len(dataset_dict[dset])
+                if remaining < self.n_img_per_dset:
+                    stop_sampling = True
+
+        return iter(final_idxs)
+
+    def __len__(self):
+        return self.length
+
+
+def build_train_sampler(
+    data_source,
+    train_sampler,
+    batch_size=32,
+    num_instances=4,
+    num_cams=1,
+    num_datasets=1,
+    **kwargs
+):
+    """Builds a training sampler.
+
+    Args:
+        data_source (list): contains tuples of (img_path(s), pid, camid).
+        train_sampler (str): sampler name (default: ``RandomSampler``).
+        batch_size (int, optional): batch size. Default is 32.
+        num_instances (int, optional): number of instances per identity in a
+            batch (when using ``RandomIdentitySampler``). Default is 4.
+        num_cams (int, optional): number of cameras to sample in a batch (when using
+            ``RandomDomainSampler``). Default is 1.
+        num_datasets (int, optional): number of datasets to sample in a batch (when
+            using ``RandomDatasetSampler``). Default is 1.
+    """
+    assert train_sampler in AVAI_SAMPLERS, \
+        'train_sampler must be one of {}, but got {}'.format(AVAI_SAMPLERS, train_sampler)
+
+    if train_sampler == 'RandomIdentitySampler':
+        sampler = RandomIdentitySampler(data_source, batch_size, num_instances)
+
+    elif train_sampler == 'RandomDomainSampler':
+        sampler = RandomDomainSampler(data_source, batch_size, num_cams)
+
+    elif train_sampler == 'RandomDatasetSampler':
+        sampler = RandomDatasetSampler(data_source, batch_size, num_datasets)
+
+    elif train_sampler == 'SequentialSampler':
+        sampler = SequentialSampler(data_source)
+
+    elif train_sampler == 'RandomSampler':
+        sampler = RandomSampler(data_source)
+
+    return sampler
+
+
+================================================================================
+torchreid/data/datasets/image/market1501.py
+================================================================================
+from __future__ import division, print_function, absolute_import
+import re
+import glob
+import os.path as osp
+import warnings
+
+from ..dataset import ImageDataset
+
+
+class Market1501(ImageDataset):
+    """Market1501.
+
+    Reference:
+        Zheng et al. Scalable Person Re-identification: A Benchmark. ICCV 2015.
+
+    URL: `<http://www.liangzheng.org/Project/project_reid.html>`_
+    
+    Dataset statistics:
+        - identities: 1501 (+1 for background).
+        - images: 12936 (train) + 3368 (query) + 15913 (gallery).
+    """
+    _junk_pids = [0, -1]
+    dataset_dir = 'market1501'
+    dataset_url = 'http://188.138.127.15:81/Datasets/Market-1501-v15.09.15.zip'
+
+    def __init__(self, root='', market1501_500k=False, **kwargs):
+        self.root = osp.abspath(osp.expanduser(root))
+        self.dataset_dir = osp.join(self.root, self.dataset_dir)
+        self.download_dataset(self.dataset_dir, self.dataset_url)
+
+        # allow alternative directory structure
+        self.data_dir = self.dataset_dir
+        data_dir = osp.join(self.data_dir, 'Market-1501-v15.09.15')
+        if osp.isdir(data_dir):
+            self.data_dir = data_dir
+        else:
+            warnings.warn(
+                'The current data structure is deprecated. Please '
+                'put data folders such as "bounding_box_train" under '
+                '"Market-1501-v15.09.15".'
+            )
+
+        self.train_dir = osp.join(self.data_dir, 'bounding_box_train')
+        self.query_dir = osp.join(self.data_dir, 'query')
+        self.gallery_dir = osp.join(self.data_dir, 'bounding_box_test')
+        self.extra_gallery_dir = osp.join(self.data_dir, 'images')
+        self.market1501_500k = market1501_500k
+
+        required_files = [
+            self.data_dir, self.train_dir, self.query_dir, self.gallery_dir
+        ]
+        if self.market1501_500k:
+            required_files.append(self.extra_gallery_dir)
+        self.check_before_run(required_files)
+
+        train = self.process_dir(self.train_dir, relabel=True)
+        query = self.process_dir(self.query_dir, relabel=False)
+        gallery = self.process_dir(self.gallery_dir, relabel=False)
+        if self.market1501_500k:
+            gallery += self.process_dir(self.extra_gallery_dir, relabel=False)
+
+        super(Market1501, self).__init__(train, query, gallery, **kwargs)
+
+    def process_dir(self, dir_path, relabel=False):
+        img_paths = glob.glob(osp.join(dir_path, '*.jpg'))
+        pattern = re.compile(r'([-\d]+)_c(\d)')
+
+        pid_container = set()
+        for img_path in img_paths:
+            pid, _ = map(int, pattern.search(img_path).groups())
+            if pid == -1:
+                continue # junk images are just ignored
+            pid_container.add(pid)
+        pid2label = {pid: label for label, pid in enumerate(pid_container)}
+
+        data = []
+        for img_path in img_paths:
+            pid, camid = map(int, pattern.search(img_path).groups())
+            if pid == -1:
+                continue # junk images are just ignored
+            assert 0 <= pid <= 1501 # pid == 0 means background
+            assert 1 <= camid <= 6
+            camid -= 1 # index starts from 0
+            if relabel:
+                pid = pid2label[pid]
+            data.append((img_path, pid, camid))
+
+        return data
+
+
+================================================================================
+MSFANET PROJECT FILES
+================================================================================
+projects/msfanet/__init__.py
+projects/msfanet/__pycache__/augmentations.cpython-38.pyc
+projects/msfanet/__pycache__/complexity.cpython-38.pyc
+projects/msfanet/__pycache__/engine.cpython-38.pyc
+projects/msfanet/__pycache__/losses.cpython-38.pyc
+projects/msfanet/__pycache__/visualization.cpython-38.pyc
+projects/msfanet/augmentations.py
+projects/msfanet/complexity.py
+projects/msfanet/engine.py
+projects/msfanet/losses.py
+projects/msfanet/requirements-msfanet.txt
+projects/msfanet/test_visualization.py
+projects/msfanet/train.py
+projects/msfanet/visualization.py
+torchreid/models/msfanet/__init__.py
+torchreid/models/msfanet/__pycache__/__init__.cpython-38.pyc
+torchreid/models/msfanet/__pycache__/aggregation_gate.cpython-38.pyc
+torchreid/models/msfanet/__pycache__/fa_block.cpython-38.pyc
+torchreid/models/msfanet/__pycache__/msfa_block.cpython-38.pyc
+torchreid/models/msfanet/__pycache__/msfanet.cpython-38.pyc
+torchreid/models/msfanet/__pycache__/se_block.cpython-38.pyc
+torchreid/models/msfanet/aggregation_gate.py
+torchreid/models/msfanet/fa_block.py
+torchreid/models/msfanet/msfa_block.py
+torchreid/models/msfanet/msfanet.py
+torchreid/models/msfanet/se_block.py
+
+================================================================================
+CHECKPOINTS AND LOGS
+================================================================================

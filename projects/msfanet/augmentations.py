@@ -36,15 +36,17 @@ def build_train_transform(height=256, width=128):
     return transforms.Compose([
         transforms.Resize((height, width)),
         transforms.RandomHorizontalFlip(p=0.5),
-        transforms.RandomCrop((height, width), padding=8, padding_mode="edge"),
-        RandomPatch(probability=0.5),
-        transforms.AutoAugment(policy=transforms.AutoAugmentPolicy.IMAGENET),
+        transforms.Pad(10),
+        transforms.RandomCrop((height, width)),
         transforms.ToTensor(),
         transforms.Normalize(
             mean=(0.485, 0.456, 0.406),
             std=(0.229, 0.224, 0.225)
         ),
         transforms.RandomErasing(
-            p=0.5, scale=(0.02, 0.4), ratio=(0.3, 3.3), value="random"
+            p=0.5,
+            scale=(0.02, 0.2),
+            ratio=(0.3, 3.3),
+            value="random"
         )
     ])
