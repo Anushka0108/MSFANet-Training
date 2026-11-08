@@ -1,0 +1,57 @@
+MSFANET DIAGNOSTIC REPORT
+Generated: 2026-11-06T10:34:53
+Working directory: /home/nushka_bhilash/deep-person-reid
+Python executable: /home/nushka_bhilash/miniconda3/envs/torchreid/bin/python
+Python version: 3.8.20 (default, Oct  3 2024, 15:24:27) 
+[GCC 11.2.0]
+Platform: Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.17
+
+PACKAGE / DEVICE INFORMATION
+PyTorch: 2.4.1+cpu
+CUDA available: False
+CUDA version: None
+CPU threads: 6
+torchreid module: /home/nushka_bhilash/deep-person-reid/torchreid/__init__.py
+torchreid version: 1.4.0
+
+DATASET CHECK
+
+DATASET ROOT: /home/nushka_bhilash/deep-person-reid/data/market1501/Market-1501-v15.09.15
+bounding_box_train: files=12937, images=12936, identities=751, cameras=[1, 2, 3, 4, 5, 6]
+  expected reference: about 12936 train images, 751 train identities (excluding junk)
+query: files=3369, images=3368, identities=750, cameras=[1, 2, 3, 4, 5, 6]
+  expected reference: 3368 query images
+bounding_box_test: files=19733, images=19732, identities=751, cameras=[1, 2, 3, 4, 5, 6]
+  expected reference: 15913 gallery images
+
+SOURCE FILE INVENTORY
+projects/msfanet/train.py: FOUND
+  bytes=3964, sha256=cd86e98c16d3dfff23f13bd809d0abfac55be42c816dffc04387c5beba977700
+projects/msfanet/engine.py: FOUND
+  bytes=8835, sha256=4c7a78a934118a07538dec450afbeadd2a0bd95aee46f62a6d93f02a757d5daa
+projects/msfanet/losses.py: FOUND
+  bytes=867, sha256=4d41b36320f2f2ad01a9d656323320df61ad5d4a4aad69ed17f9600216f5a465
+projects/msfanet/augmentations.py: FOUND
+  bytes=1658, sha256=8152f036206e99282936f884d01d545829ba4cc92a4ee224f0a901fb031290fb
+projects/msfanet/complexity.py: FOUND
+  bytes=796, sha256=4b469f1fcc23640c9216585afec66f5ba8f984c94b9438c80bc1b169d1f204a8
+projects/msfanet/visualization.py: FOUND
+  bytes=2893, sha256=b8f368167b42c1cf9e087d1c62ead950cdfa48259bbe517e6bf9807491eb5831
+torchreid/models/msfanet/msfanet.py: FOUND
+  bytes=4928, sha256=c3ad25c21bd595df4ba1c5d5f1a5170fa7b2ed4951e8a85f67094fd75339a5f7
+torchreid/models/msfanet/aggregation_gate.py: FOUND
+  bytes=350, sha256=9ecd9c19f2a4906cfcf803a14b45e6c9cb132f31033819ce4a9d5992c0be9a52
+torchreid/models/msfanet/fa_block.py: FOUND
+  bytes=1507, sha256=6bbd89cb6f2e3467f47c65603dc37dd6aea512f54d24174289ab6c9cd6a837e6
+torchreid/models/msfanet/msfa_block.py: FOUND
+  bytes=3333, sha256=fc044b9f380a8ed9c7c6dd09976f9480f5596ee3fb04dc388fb278cdff5844a7
+torchreid/models/msfanet/se_block.py: FOUND
+  bytes=703, sha256=4630448b528a47901a88b61c247ab7b443dd1fd8e734fbd24836c348455fbf82
+torchreid/metrics/rank.py: FOUND
+  bytes=7126, sha256=ec464730962a80b7bef906d60b4d47571310100555e74510ff6d5c1bdeedbdec
+
+CHECKPOINT INVENTORY
+No .pth/.pt/.ckpt files found in log/checkpoints/output/runs.
+
+TRAINING / EVALUATION CSV INVENTORY
+No CSV files found.

@@ -224,6 +224,15 @@ class MSFANetEngine(Engine):
         self.metric_history.append(row)
         self._save_metric_history()
 
+        if dataset_name == "market1501":
+            if row["epoch"] in [100, 200, 300, 400]:
+                self.save_epoch_checkpoint(
+                    row["epoch"],
+                    rank1
+                )
+
+                self.save_epoch_visualizations(row["epoch"])
+
         if self.writer is not None:
             for key in ("rank1", "rank5", "rank10", "rank20", "mAP"):
                 self.writer.add_scalar(
@@ -244,7 +253,7 @@ class MSFANetEngine(Engine):
         return rank1, mean_ap
 
     def save_epoch_visualizations(self, epoch):
-        if epoch % 10 != 0:
+        if epoch not in [100, 200, 300, 400]:
             return
 
         query_loader = self.test_loader["market1501"]["query"]
@@ -260,6 +269,29 @@ class MSFANetEngine(Engine):
             max_images=4
         )
 
+        print(f"Activation maps saved for epoch {epoch}")
+
+    def save_epoch_checkpoint(self, epoch, rank1):
+        checkpoint_dir = self.output_dir / "checkpoints"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        checkpoint = {
+            "epoch": epoch,
+            "rank1": rank1,
+            "state_dict": self.model.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "scheduler": (
+                self.scheduler.state_dict()
+                if self.scheduler is not None else None
+            )
+        }
+
+        checkpoint_path = checkpoint_dir / f"model.pth.tar-{epoch}"
+
+        torch.save(checkpoint, checkpoint_path)
+
+        print(f"Checkpoint saved: {checkpoint_path}")
+    
     def _save_metric_history(self):
         if not self.metric_history:
             return

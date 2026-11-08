@@ -16,15 +16,15 @@ from visualization import save_feature_visualizations
 
 
 SEED = 42
-EPOCHS = 100
+EPOCHS = 400
 HEIGHT = 256
 WIDTH = 128
 BATCH_SIZE = 128
 NUM_INSTANCES = 4
 WORKERS = 4
-INITIAL_LR = 0.0003
+INITIAL_LR = 0.065
 WEIGHT_DECAY = 5e-4
-OUTPUT_DIR = Path("log/msfanet_market1501_100ep")
+OUTPUT_DIR = Path("log/msfanet_market1501_400ep")
 
 
 def set_seed(seed):
@@ -75,9 +75,12 @@ def main():
         amsgrad=True
     )
 
-    milestones = [40, 70, 90]
+    milestones = [150, 250, 350]
+
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        optimizer, milestones=milestones, gamma=0.1
+        optimizer,
+        milestones=milestones,
+        gamma=0.1
     )
 
     complexity = calculate_complexity(model, HEIGHT, WIDTH)
