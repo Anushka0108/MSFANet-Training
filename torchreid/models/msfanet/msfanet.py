@@ -1,3 +1,4 @@
+
 import torch
 import torch.nn as nn
 
@@ -45,7 +46,13 @@ class MSFANet(nn.Module):
         )
 
         self.global_avgpool = nn.AdaptiveAvgPool2d(1)
-        self.classifier = nn.Linear(self.feature_dim, num_classes)
+
+        self.feature_bn = nn.BatchNorm1d(self.feature_dim)
+        self.feature_bn.bias.requires_grad_(False)
+
+        self.classifier = nn.Linear(
+            self.feature_dim, num_classes
+        )
 
         self.last_activation_map = None
 
@@ -94,6 +101,10 @@ class MSFANet(nn.Module):
                 nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)
 
+            elif isinstance(module, nn.BatchNorm1d):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+
             elif isinstance(module, nn.Linear):
                 nn.init.normal_(module.weight, std=0.001)
                 nn.init.zeros_(module.bias)
@@ -119,7 +130,8 @@ class MSFANet(nn.Module):
         if not self.training:
             return features
 
-        logits = self.classifier(features)
+        bn_features = self.feature_bn(features)
+        logits = self.classifier(bn_features)
 
         return logits, features
 

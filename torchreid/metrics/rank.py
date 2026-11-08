@@ -96,7 +96,12 @@ def eval_market1501(distmat, q_pids, g_pids, q_camids, g_camids, max_rank):
     Key: for each query identity, its gallery images from the same camera view are discarded.
     """
     num_q, num_g = distmat.shape
-    
+
+    distmat = np.asarray(distmat)
+    q_pids = np.asarray(q_pids)
+    g_pids = np.asarray(g_pids)
+    q_camids = np.asarray(q_camids)
+    g_camids = np.asarray(g_camids)
 
     if num_g < max_rank:
         max_rank = num_g
