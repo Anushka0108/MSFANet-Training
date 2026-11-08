@@ -24,6 +24,9 @@ NUM_INSTANCES = 4
 WORKERS = 4
 INITIAL_LR = 0.065
 WEIGHT_DECAY = 5e-4
+from collections import Counter
+
+CHECKPOINT_PATH = Path("projects/msfanet/model.pth.tar-190")
 OUTPUT_DIR = Path("log/msfanet_market1501_400ep")
 
 
@@ -101,6 +104,7 @@ def main():
     engine.run(
         save_dir=str(OUTPUT_DIR),
         max_epoch=EPOCHS,
+        start_epoch=start_epoch,
         print_freq=20,
         eval_freq=10,
         start_eval=1,
