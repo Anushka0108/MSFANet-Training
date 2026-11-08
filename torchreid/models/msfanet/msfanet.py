@@ -30,18 +30,18 @@ class MSFANet(nn.Module):
         )
 
         self.stage1 = self._make_stage(
-            64, 256, blocks=1, width=widths[0], first_stride=1,
-            reduction=reduction
+            64, 256, blocks=1, width=widths[0],
+            first_stride=1, reduction=reduction
         )
 
         self.stage2 = self._make_stage(
-            256, 384, blocks=2, width=widths[1], first_stride=2,
-            reduction=reduction
+            256, 384, blocks=2, width=widths[1],
+            first_stride=2, reduction=reduction
         )
 
         self.stage3 = self._make_stage(
-            384, 512, blocks=3, width=widths[2], first_stride=2,
-            reduction=reduction
+            384, 512, blocks=3, width=widths[2],
+            first_stride=2, reduction=reduction
         )
 
         self.global_avgpool = nn.AdaptiveAvgPool2d(1)
@@ -86,6 +86,7 @@ class MSFANet(nn.Module):
                     mode="fan_out",
                     nonlinearity="leaky_relu"
                 )
+
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
@@ -100,6 +101,7 @@ class MSFANet(nn.Module):
     def featuremaps(self, x):
         x = self.conv1(x)
         x = self.pool1(x)
+
         x = self.stage1(x)
         x = self.stage2(x)
         x = self.stage3(x)
@@ -119,9 +121,7 @@ class MSFANet(nn.Module):
 
         logits = self.classifier(features)
 
-        return logits, features 
-
-        raise KeyError("Unsupported loss: {}".format(self.loss))
+        return logits, features
 
     def get_visual_maps(self):
         maps = {
@@ -133,32 +133,61 @@ class MSFANet(nn.Module):
 
             for block_index, block in enumerate(stage):
                 prefix = "{}_block{}".format(
-                    stage_name, block_index + 1
+                    stage_name,
+                    block_index + 1
                 )
+
+                for branch_index, activation_map in enumerate(
+                    block.last_pre_gate_maps
+                ):
+                    maps[
+                        "{}_branch{}_before_gate".format(
+                            prefix, branch_index + 1
+                        )
+                    ] = activation_map
+
+                for branch_index, activation_map in enumerate(
+                    block.last_branch_maps
+                ):
+                    maps[
+                        "{}_branch{}_after_gate".format(
+                            prefix, branch_index + 1
+                        )
+                    ] = activation_map
 
                 for branch_index, gate_map in enumerate(
                     block.last_gate_visual_maps
                 ):
                     maps[
-                        "{}_gate{}".format(prefix, branch_index + 1)
+                        "{}_gate{}_channel_mean".format(
+                            prefix, branch_index + 1
+                        )
                     ] = gate_map
 
                 for branch_index, gate_map in enumerate(
                     block.last_gate_maps
                 ):
                     maps[
-                        "{}_gate{}".format(
+                        "{}_gate{}_channel_weights".format(
                             prefix, branch_index + 1
                         )
                     ] = gate_map
 
-                for branch_name in ("branch1", "branch2", "branch3"):
+                maps["{}_fused_activation".format(prefix)] = (
+                    block.last_fused_map
+                )
+
+                for branch_name in (
+                    "branch1",
+                    "branch2",
+                    "branch3"
+                ):
                     branch = getattr(block, branch_name)
 
                     for fa_index, fa in enumerate(branch):
                         if fa.last_attention_map is not None:
                             maps[
-                                "{}_{}_fa{}_se".format(
+                                "{}_{}_fa{}_se_channel_weights".format(
                                     prefix,
                                     branch_name,
                                     fa_index + 1

@@ -15,7 +15,7 @@ class MSFABlock(nn.Module):
         reduction=16
     ):
         super().__init__()
-        self.last_gate_visual_maps = []
+
         self.project = nn.Sequential(
             nn.Conv2d(
                 in_channels,
@@ -68,8 +68,12 @@ class MSFABlock(nn.Module):
         )
 
         self.activation = nn.LeakyReLU(0.1, inplace=True)
+
         self.last_branch_maps = []
+        self.last_pre_gate_maps = []
         self.last_gate_maps = []
+        self.last_gate_visual_maps = []
+        self.last_fused_map = None
 
     def forward(self, x):
         identity = self.shortcut(x)
@@ -79,21 +83,30 @@ class MSFABlock(nn.Module):
 
         b2_outputs = []
         value = branch_input
+
         for block in self.branch2:
             value = block(value)
             b2_outputs.append(value)
+
         b2 = b2_outputs[-1]
 
         b3_outputs = []
         value = branch_input
+
         for block in self.branch3:
             value = block(value)
             b3_outputs.append(value)
+
         b3 = b3_outputs[-1]
 
-        # Cross-branch averaging described in Equation (3).
         b1 = 0.5 * (b1 + b2_outputs[0])
         b2 = 0.5 * (b2 + b3_outputs[2])
+
+        self.last_pre_gate_maps = [
+            b1.detach().abs().mean(dim=1, keepdim=True),
+            b2.detach().abs().mean(dim=1, keepdim=True),
+            b3.detach().abs().mean(dim=1, keepdim=True)
+        ]
 
         gate1 = self.gates[0](branch_input)
         gate2 = self.gates[1](branch_input)
@@ -102,9 +115,6 @@ class MSFABlock(nn.Module):
         g1 = b1 * gate1
         g2 = b2 * gate2
         g3 = b3 * gate3
-
-        fused = torch.cat([g1, g2, g3], dim=1)
-        fused = self.fuse(fused)
 
         self.last_branch_maps = [
             g1.detach().abs().mean(dim=1, keepdim=True),
@@ -123,5 +133,13 @@ class MSFABlock(nn.Module):
             gate2.detach().mean(dim=1, keepdim=True),
             gate3.detach().mean(dim=1, keepdim=True)
         ]
+
+        fused = torch.cat([g1, g2, g3], dim=1)
+        fused = self.fuse(fused)
+
+        self.last_fused_map = fused.detach().abs().mean(
+            dim=1,
+            keepdim=True
+        )
 
         return self.activation(identity + fused)
