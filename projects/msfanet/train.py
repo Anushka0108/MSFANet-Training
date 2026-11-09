@@ -2,13 +2,12 @@
 import os
 import random
 import csv
-from collections import Counter
 from pathlib import Path
 
 import numpy as np
 import torch
-
 import torchreid
+
 from torchreid import models
 
 from augmentations import build_train_transform
@@ -19,19 +18,27 @@ from visualization import save_feature_visualizations
 
 SEED = 42
 EPOCHS = 400
+
 HEIGHT = 256
 WIDTH = 128
+
 BATCH_SIZE = 128
 NUM_INSTANCES = 4
 WORKERS = 4
-INITIAL_LR = 0.065
+
 WEIGHT_DECAY = 5e-4
 
-CHECKPOINT_PATH = Path("projects/msfanet/model.pth.tar-190")
-OUTPUT_DIR = Path("log/msfanet_market1501_resume_190")
+CHECKPOINT_PATH = Path(
+    "/content/drive/MyDrive/MSFANet_Results/model.pth.tar-60"
+)
 
-START_EPOCH = 190
-MILESTONES = [225, 300, 350]
+OUTPUT_DIR = Path(
+    "/content/drive/MyDrive/MSFANet_Results/MSFANet_Resume_60"
+)
+
+EXPECTED_CHECKPOINT_EPOCH = 60
+
+MILESTONES = [150, 225, 300, 350]
 
 
 def set_seed(seed):
@@ -58,8 +65,38 @@ def main():
         )
 
     use_gpu = torch.cuda.is_available()
+    device = torch.device("cuda" if use_gpu else "cpu")
 
-    print(f"Device: {'CUDA' if use_gpu else 'CPU'}")
+    print(f"Device: {device}")
+
+    checkpoint = torch.load(
+        CHECKPOINT_PATH,
+        map_location="cpu",
+        weights_only=False
+    )
+
+    if not isinstance(checkpoint, dict):
+        raise RuntimeError("Invalid checkpoint format.")
+
+    required_keys = ["state_dict", "optimizer", "scheduler", "epoch"]
+
+    missing_keys = [
+        key for key in required_keys
+        if key not in checkpoint
+    ]
+
+    if missing_keys:
+        raise RuntimeError(
+            f"Checkpoint is missing required keys: {missing_keys}"
+        )
+
+    checkpoint_epoch = int(checkpoint["epoch"])
+
+    if checkpoint_epoch != EXPECTED_CHECKPOINT_EPOCH:
+        raise RuntimeError(
+            f"Expected checkpoint epoch {EXPECTED_CHECKPOINT_EPOCH}, "
+            f"but found epoch {checkpoint_epoch}."
+        )
 
     datamanager = torchreid.data.ImageDataManager(
         root="data",
@@ -86,15 +123,21 @@ def main():
         pretrained=False
     )
 
-    if use_gpu:
-        model = model.cuda()
+    model.load_state_dict(
+        checkpoint["state_dict"],
+        strict=True
+    )
+
+    model = model.to(device)
 
     optimizer = torch.optim.Adam(
         model.parameters(),
-        lr=INITIAL_LR,
+        lr=0.0003,
         weight_decay=WEIGHT_DECAY,
         amsgrad=True
     )
+
+    optimizer.load_state_dict(checkpoint["optimizer"])
 
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer,
@@ -102,61 +145,20 @@ def main():
         gamma=0.1
     )
 
-    checkpoint = torch.load(
-        CHECKPOINT_PATH,
-        map_location="cpu",
-        weights_only=False
-    )
-
-    model_state = checkpoint.get(
-        "state_dict",
-        checkpoint.get("model", checkpoint)
-    )
-
-    model.load_state_dict(
-        model_state,
-        strict=True
-    )
-
-    checkpoint_epoch = int(
-        checkpoint.get("epoch", START_EPOCH)
-    )
-
-    if checkpoint_epoch != START_EPOCH:
-        raise RuntimeError(
-            f"Expected epoch {START_EPOCH}, "
-            f"but checkpoint contains epoch {checkpoint_epoch}"
-        )
-
-    if "optimizer" not in checkpoint:
-        raise RuntimeError(
-            "This checkpoint does not contain optimizer state. "
-            "Exact training resumption is not possible from this file."
-        )
-
-    optimizer.load_state_dict(checkpoint["optimizer"])
-
-    if checkpoint.get("scheduler") is not None:
-        scheduler.load_state_dict(checkpoint["scheduler"])
-
-        scheduler.milestones = Counter({
-            milestone: 1 for milestone in MILESTONES
-        })
-    else:
-        raise RuntimeError(
-            "This checkpoint does not contain scheduler state. "
-            "Cannot safely resume the original training schedule."
-        )
+    scheduler.load_state_dict(checkpoint["scheduler"])
 
     start_epoch = checkpoint_epoch
 
+    current_lr = optimizer.param_groups[0]["lr"]
+
     print("\nCheckpoint restored successfully")
     print("Checkpoint:", CHECKPOINT_PATH)
-    print("Completed epoch:", start_epoch)
+    print("Completed epoch:", checkpoint_epoch)
     print("Next epoch:", start_epoch + 1)
     print("Final epoch:", EPOCHS)
-    print("Learning rate:", optimizer.param_groups[0]["lr"])
-    print("Future milestones:", MILESTONES)
+    print("Learning rate:", current_lr)
+    print("Scheduler milestones:", sorted(scheduler.milestones.elements()))
+    print("Scheduler last epoch:", scheduler.last_epoch)
 
     complexity = calculate_complexity(
         model,
@@ -164,7 +166,9 @@ def main():
         WIDTH
     )
 
-    print("Model complexity:", complexity)
+    print("\nModel complexity:")
+    for key, value in complexity.items():
+        print(f"{key}: {value}")
 
     engine = MSFANetEngine(
         datamanager=datamanager,
@@ -196,20 +200,19 @@ def main():
             handle.write(f"{key}: {value}\n")
 
     try:
-        from openpyxl import load_workbook
+        from openpyxl import Workbook, load_workbook
 
         workbook_path = OUTPUT_DIR / "msfanet_results.xlsx"
 
         if workbook_path.exists():
             workbook = load_workbook(workbook_path)
         else:
-            from openpyxl import Workbook
             workbook = Workbook()
+
+        training_csv = OUTPUT_DIR / "training_batches.csv"
 
         if "Training Batches" in workbook.sheetnames:
             del workbook["Training Batches"]
-
-        training_csv = OUTPUT_DIR / "training_batches.csv"
 
         if training_csv.exists():
             training_sheet = workbook.create_sheet(
@@ -217,7 +220,9 @@ def main():
             )
 
             with training_csv.open(newline="") as csv_file:
-                for row in csv.reader(csv_file):
+                reader = csv.reader(csv_file)
+
+                for row in reader:
                     training_sheet.append(row)
 
         if "Model Complexity" in workbook.sheetnames:
@@ -236,6 +241,8 @@ def main():
             del workbook["Sheet"]
 
         workbook.save(workbook_path)
+
+        print("\nExcel results saved:", workbook_path)
 
     except Exception as error:
         print(f"Excel workbook update skipped: {error}")
