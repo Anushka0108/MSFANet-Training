@@ -1,12 +1,17 @@
+
 import random
 
-import numpy as np
-from PIL import Image
 from torchvision import transforms
+from torchvision.transforms import AutoAugment, AutoAugmentPolicy
 
 
 class RandomPatch:
-    def __init__(self, probability=0.5, min_fraction=0.08, max_fraction=0.25):
+    def __init__(
+        self,
+        probability=0.5,
+        min_fraction=0.08,
+        max_fraction=0.25
+    ):
         self.probability = probability
         self.min_fraction = min_fraction
         self.max_fraction = max_fraction
@@ -17,18 +22,38 @@ class RandomPatch:
 
         image = image.copy()
         width, height = image.size
-        patch_w = max(1, int(width * random.uniform(self.min_fraction, self.max_fraction)))
-        patch_h = max(1, int(height * random.uniform(self.min_fraction, self.max_fraction)))
 
-        source_x = random.randint(0, max(0, width - patch_w))
-        source_y = random.randint(0, max(0, height - patch_h))
-        target_x = random.randint(0, max(0, width - patch_w))
-        target_y = random.randint(0, max(0, height - patch_h))
+        patch_w = max(
+            1,
+            int(width * random.uniform(
+                self.min_fraction,
+                self.max_fraction
+            ))
+        )
+
+        patch_h = max(
+            1,
+            int(height * random.uniform(
+                self.min_fraction,
+                self.max_fraction
+            ))
+        )
+
+        source_x = random.randint(0, width - patch_w)
+        source_y = random.randint(0, height - patch_h)
+
+        target_x = random.randint(0, width - patch_w)
+        target_y = random.randint(0, height - patch_h)
 
         patch = image.crop((
-            source_x, source_y, source_x + patch_w, source_y + patch_h
+            source_x,
+            source_y,
+            source_x + patch_w,
+            source_y + patch_h
         ))
+
         image.paste(patch, (target_x, target_y))
+
         return image
 
 
@@ -38,6 +63,8 @@ def build_train_transform(height=256, width=128):
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.Pad(10),
         transforms.RandomCrop((height, width)),
+        RandomPatch(probability=0.5),
+        AutoAugment(policy=AutoAugmentPolicy.IMAGENET),
         transforms.ToTensor(),
         transforms.Normalize(
             mean=(0.485, 0.456, 0.406),

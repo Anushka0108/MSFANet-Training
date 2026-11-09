@@ -1,7 +1,5 @@
-import torch.nn as nn
-
 from ..osnet import ChannelGate
-
+import torch.nn as nn
 
 class AggregationGate(nn.Module):
     def __init__(self, channels, reduction=16):
