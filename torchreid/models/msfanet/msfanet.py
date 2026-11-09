@@ -127,10 +127,11 @@ class MSFANet(nn.Module):
         x = self.featuremaps(x)
         features = self.global_avgpool(x).flatten(1)
 
-        if not self.training:
-            return features
-
         bn_features = self.feature_bn(features)
+
+        if not self.training:
+            return bn_features
+
         logits = self.classifier(bn_features)
 
         return logits, features
