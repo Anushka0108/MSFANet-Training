@@ -1,3 +1,4 @@
+
 import torch
 import torch.nn as nn
 
@@ -40,11 +41,14 @@ class MSFABlock(nn.Module):
             *[FABlock(width, reduction) for _ in range(5)]
         )
 
-        self.gate = AggregationGate(width, reduction)
+        self.gates = nn.ModuleList([
+            AggregationGate(width, reduction)
+            for _ in range(3)
+        ])
 
         self.fuse = nn.Sequential(
             nn.Conv2d(
-                width,
+                width * 3,
                 out_channels,
                 kernel_size=1,
                 bias=False
@@ -84,8 +88,6 @@ class MSFABlock(nn.Module):
             value = block(value)
             b2_outputs.append(value)
 
-        b2 = b2_outputs[-1]
-
         b3_outputs = []
         value = branch_input
 
@@ -93,6 +95,7 @@ class MSFABlock(nn.Module):
             value = block(value)
             b3_outputs.append(value)
 
+        b2 = b2_outputs[-1]
         b3 = b3_outputs[-1]
 
         b1 = 0.5 * (b1 + b2_outputs[0])
@@ -104,9 +107,9 @@ class MSFABlock(nn.Module):
             b3.detach().abs().mean(dim=1, keepdim=True)
         ]
 
-        gate1 = self.gate(b1)
-        gate2 = self.gate(b2)
-        gate3 = self.gate(b3)
+        gate1 = self.gates[0](b1)
+        gate2 = self.gates[1](b2)
+        gate3 = self.gates[2](b3)
 
         g1 = b1 * gate1
         g2 = b2 * gate2
@@ -130,8 +133,7 @@ class MSFABlock(nn.Module):
             gate3.detach().mean(dim=1, keepdim=True)
         ]
 
-        fused = g1 + g2 + g3
-
+        fused = torch.cat([g1, g2, g3], dim=1)
         fused = self.fuse(fused)
 
         self.last_fused_map = fused.detach().abs().mean(
